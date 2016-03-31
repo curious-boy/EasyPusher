@@ -4,101 +4,212 @@
 	WEChat: EasyDarwin
 	Website: http://www.EasyDarwin.org
 */
-#define _CRTDBG_MAP_ALLOC
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+#define KEY "6A34714D6C3469576B5A7541662F5257715174355875784659584E355548567A6147567958314A55553141755A58686C56752B7141506A655A57467A65513D3D"
+#define EasyRTSPClient_KEY "6A59754D6A3469576B5A73413066565771516F6E3375784659584E355548567A6147567958314A55553141755A58686C56752B7141506A655A57467A65513D3D"
+#include "getopt.h"
+#else
+#define KEY "6A34714D6C3469576B5A7541662F5257715174355876426C59584E356348567A6147567958334A306333425737366F412B4E356C59584E35"
+#define EasyRTSPClient_KEY "6A59754D6A354F576B596F413066565771516F6E3376426C59584E356348567A6147567958334A306333425737366F412B4E356C59584E35"
+#include "unistd.h"
+#include <signal.h>
+#endif
 #include "EasyPusherAPI.h"
-#include "EasyNVSourceAPI.h"
-#include <winsock2.h>
+#include "EasyRTSPClientAPI.h"
 
+char* ConfigIP		= "127.0.0.1";		//Default EasyDarwin Address
+char* ConfigPort	= "554";				//Default EasyDarwin Port
+char* ConfigName	= "easypusher_rtsp.sdp";//Default Stream Name
+char* ConfigRTSPURL	= "rtsp://admin:admin@192.168.1.189/22";	//RTSP Source URL(With username:password@)
+char* ProgName;		//Program Name
 
-#define RTSPURL "rtsp://admin:admin@192.168.66.189/"
+Easy_Pusher_Handle	fPusherHandle = 0;		//libEasyPusher Handle
+Easy_RTSP_Handle	fRTSPHandle = 0;		//libEasyRTSPClient Handle
 
-#define SHOST	"127.0.0.1"		//EasyDarwin流媒体服务器地址115.29.139.20
-#define SPORT	554					//EasyDarwin流媒体服务器端口
+EASY_MEDIA_INFO_T*	fSourceMediaInfo = NULL;
 
-Easy_U32 pusherHandle = 0;
-Easy_NVS_Handle fNVSHandle = 0;
-
-/* NVSource从RTSPClient获取数据后回调给上层 */
-int CALLBACK __NVSourceCallBack( int _chid, int *_chPtr, int _mediatype, char *pbuf, NVS_FRAME_INFO *frameinfo)
-{
-	if (NULL != frameinfo)
-	{
-		if (frameinfo->height==1088)		frameinfo->height=1080;
-		else if (frameinfo->height==544)	frameinfo->height=540;
-	}
-
-	if (_mediatype == MEDIA_TYPE_VIDEO)
-	{
-		if(pusherHandle == 0 )
-			return 0;
-
-		if(frameinfo && frameinfo->length)
-		{
-				EASY_AV_Frame  avFrame;
-				memset(&avFrame, 0x00, sizeof(EASY_AV_Frame));
-				avFrame.u32AVFrameLen = frameinfo->length;
-				avFrame.pBuffer = (unsigned char*)pbuf;
-				avFrame.u32VFrameType = (frameinfo->type==FRAMETYPE_I)?EASY_SDK_VIDEO_FRAME_I:EASY_SDK_VIDEO_FRAME_P;
-				EasyPusher_PushFrame(pusherHandle, &avFrame);
-		}	
-	}
-	return 0;
-}
-
+/* EasyPusher Callback */
 int __EasyPusher_Callback(int _id, EASY_PUSH_STATE_T _state, EASY_AV_Frame *_frame, void *_userptr)
 {
     if (_state == EASY_PUSH_STATE_CONNECTING)               printf("Connecting...\n");
     else if (_state == EASY_PUSH_STATE_CONNECTED)           printf("Connected\n");
     else if (_state == EASY_PUSH_STATE_CONNECT_FAILED)      printf("Connect failed\n");
     else if (_state == EASY_PUSH_STATE_CONNECT_ABORT)       printf("Connect abort\n");
-    //else if (_state == EASY_PUSH_STATE_PUSHING)             printf("P->");
+	else if (_state == EASY_PUSH_STATE_PUSHING)             printf("\r Pushing to rtsp://%s:%d/%s ...", ConfigIP, atoi(ConfigPort), ConfigName);
     else if (_state == EASY_PUSH_STATE_DISCONNECTED)        printf("Disconnect.\n");
 
     return 0;
 }
 
-int main()
+/* EasyRTSPClient Callback */
+int Easy_APICALL __RTSPSourceCallBack( int _chid, int *_chPtr, int _mediatype, char *pbuf, RTSP_FRAME_INFO *frameinfo)
 {
-
-	//创建NVSource
-	EasyNVS_Init(&fNVSHandle);
-
-	if (NULL == fNVSHandle) return 0;
-
-	unsigned int mediaType = MEDIA_TYPE_VIDEO;
-	//mediaType |= MEDIA_TYPE_AUDIO;	//换为NVSource, 屏蔽声音
-
-	EasyNVS_SetCallback(fNVSHandle, __NVSourceCallBack);
-	EasyNVS_OpenStream(fNVSHandle, 0, RTSPURL, RTP_OVER_TCP, mediaType, 0, 0, NULL, 1000, 0);
-	
-	WSADATA wsaData;
-    WSAStartup(MAKEWORD(2,2), &wsaData); 
-
-    EASY_MEDIA_INFO_T mediainfo;
-
-    memset(&mediainfo, 0x00, sizeof(EASY_MEDIA_INFO_T));
-    mediainfo.u32VideoCodec =   0x1C;
-
-    pusherHandle = EasyPusher_Create();
-
-    EasyPusher_SetEventCallback(pusherHandle, __EasyPusher_Callback, 0, NULL);
-
-    EasyPusher_StartStream(pusherHandle, SHOST, SPORT, "live.sdp", "admin", "admin", &mediainfo);
-	printf("*** live streaming url:rtsp://%s:%d/live.sdp ***\n", SHOST, SPORT);
-
-	while(1)
+	if (_mediatype == EASY_SDK_VIDEO_FRAME_FLAG)
 	{
-		Sleep(10);	
-	};
+		if((fPusherHandle == 0) && (fSourceMediaInfo != NULL) && (frameinfo->type == EASY_SDK_VIDEO_FRAME_I))
+		{
+			EASY_MEDIA_INFO_T mediainfo;
+			memset(&mediainfo, 0x00, sizeof(EASY_MEDIA_INFO_T));
+			memcpy(&mediainfo, fSourceMediaInfo, sizeof(EASY_MEDIA_INFO_T));
+			mediainfo.u32H264SpsLength = frameinfo->reserved1-4;
+			mediainfo.u32H264PpsLength = frameinfo->reserved2-frameinfo->reserved1-4;
+			memcpy(mediainfo.u8H264Sps, pbuf+4, mediainfo.u32H264SpsLength);
+			memcpy(mediainfo.u8H264Pps, pbuf+4+mediainfo.u32H264SpsLength+4, mediainfo.u32H264PpsLength);
 
-    EasyPusher_StopStream(pusherHandle);
-    EasyPusher_Release(pusherHandle);
-    pusherHandle = 0;
+			fPusherHandle = EasyPusher_Create();
+			EasyPusher_SetEventCallback(fPusherHandle, __EasyPusher_Callback, 0, NULL);
+			EasyPusher_StartStream(fPusherHandle, ConfigIP, atoi(ConfigPort), ConfigName, "admin", "admin", &mediainfo, 1024, false);//1M缓冲区
+			printf("*** live streaming url:rtsp://%s:%d/%s ***\n", ConfigIP, atoi(ConfigPort), ConfigName);
+		}
+
+		if(frameinfo && frameinfo->length)
+		{
+			EASY_AV_Frame  avFrame;
+			memset(&avFrame, 0x00, sizeof(EASY_AV_Frame));
+			avFrame.u32AVFrameLen = frameinfo->length;
+			avFrame.pBuffer = (unsigned char*)pbuf;
+			avFrame.u32VFrameType = frameinfo->type;
+			avFrame.u32AVFrameFlag = EASY_SDK_VIDEO_FRAME_FLAG;
+			avFrame.u32TimestampSec = frameinfo->timestamp_sec;
+			avFrame.u32TimestampUsec = frameinfo->timestamp_usec;
+			EasyPusher_PushFrame(fPusherHandle, &avFrame);
+		}	
+	}
+
+	if (_mediatype == EASY_SDK_AUDIO_FRAME_FLAG)
+	{
+		if(fPusherHandle == 0 ) return 0;
+
+		if(frameinfo && frameinfo->length)
+		{
+			EASY_AV_Frame  avFrame;
+			memset(&avFrame, 0x00, sizeof(EASY_AV_Frame));
+			avFrame.u32AVFrameLen = frameinfo->length;
+			avFrame.pBuffer = (unsigned char*)pbuf;
+			avFrame.u32VFrameType = frameinfo->type;
+			avFrame.u32AVFrameFlag = EASY_SDK_AUDIO_FRAME_FLAG;
+			avFrame.u32TimestampSec = frameinfo->timestamp_sec;
+			avFrame.u32TimestampUsec = frameinfo->timestamp_usec;
+			EasyPusher_PushFrame(fPusherHandle, &avFrame);
+		}	
+	}
+
+	if (_mediatype == EASY_SDK_MEDIA_INFO_FLAG)
+	{
+		if((pbuf != NULL) && (fSourceMediaInfo == NULL))
+		{
+			fSourceMediaInfo = new EASY_MEDIA_INFO_T();
+			memcpy(fSourceMediaInfo, pbuf, sizeof(EASY_MEDIA_INFO_T));
+		}
+	}
+	return 0;
+}
+void PrintUsage()
+{
+	printf("Usage:\n");
+	printf("------------------------------------------------------\n");
+	printf("%s [-d <host> -p <port> -n <streamName> -u <RTSPURL>]\n", ProgName);
+	printf("Help Mode:   %s -h \n", ProgName );
+	printf("For example: %s -d 115.29.139.20 -p 554 -n easypusher_rtsp.sdp -u rtsp://admin:admin@anfengde.f3322.org/22\n", ProgName); 
+	printf("------------------------------------------------------\n");
+}
+int main(int argc, char * argv[])
+{
+	int isActivated = 0 ;
+#ifndef _WIN32
+   signal(SIGPIPE, SIG_IGN);
+#endif
+
+#ifdef _WIN32
+	extern char* optarg;
+#endif
+	int ch;
+	ProgName = argv[0];
+	PrintUsage();
+
+	while ((ch = getopt(argc,argv, "hd:p:n:u:")) != EOF) 
+	{
+		switch(ch)
+		{
+		case 'h':
+			PrintUsage();
+			return 0;
+			break;
+		case 'd':
+			ConfigIP =optarg;
+			break;
+		case 'p':
+			ConfigPort =optarg;
+			break;
+		case 'n':
+			ConfigName =optarg;
+			break;
+		case 'u':
+			ConfigRTSPURL =optarg;
+			break;
+		case '?':
+			return 0;
+			break;
+		default:
+			break;
+		}
+	}
+
+	isActivated = EasyPusher_Activate(KEY);
+	switch(isActivated)
+	{
+	case EASY_ACTIVATE_INVALID_KEY:
+		printf("KEY is EASY_ACTIVATE_INVALID_KEY!\n");
+		break;
+	case EASY_ACTIVATE_TIME_ERR:
+		printf("KEY is EASY_ACTIVATE_TIME_ERR!\n");
+		break;
+	case EASY_ACTIVATE_PROCESS_NAME_LEN_ERR:
+		printf("KEY is EASY_ACTIVATE_PROCESS_NAME_LEN_ERR!\n");
+		break;
+	case EASY_ACTIVATE_PROCESS_NAME_ERR:
+		printf("KEY is EASY_ACTIVATE_PROCESS_NAME_ERR!\n");
+		break;
+	case EASY_ACTIVATE_VALIDITY_PERIOD_ERR:
+		printf("KEY is EASY_ACTIVATE_VALIDITY_PERIOD_ERR!\n");
+		break;
+	case EASY_ACTIVATE_SUCCESS:
+		printf("KEY is EASY_ACTIVATE_SUCCESS!\n");
+		break;
+	}
+
+	if(EASY_ACTIVATE_SUCCESS != isActivated)
+		return -1;
+
+	if(EASY_ACTIVATE_SUCCESS != EasyRTSP_Activate(EasyRTSPClient_KEY))
+		return -1;
+
+	//Create RTSPClient Handle
+	EasyRTSP_Init(&fRTSPHandle);
+
+	if (NULL == fRTSPHandle) return 0;
+
+	unsigned int mediaType = EASY_SDK_VIDEO_FRAME_FLAG | EASY_SDK_AUDIO_FRAME_FLAG;	//Get Video & Audio
+
+	EasyRTSP_SetCallback(fRTSPHandle, __RTSPSourceCallBack);
+	EasyRTSP_OpenStream(fRTSPHandle, 0, ConfigRTSPURL, RTP_OVER_TCP, mediaType, 0, 0, NULL, 1000, 0, 1);
+
+    printf("Press Enter exit...\n");
+    getchar();
+
+	if(fPusherHandle)
+	{
+		EasyPusher_StopStream(fPusherHandle);
+		EasyPusher_Release(fPusherHandle);
+		fPusherHandle = NULL;
+	}
    
-	EasyNVS_CloseStream(fNVSHandle);
-	EasyNVS_Deinit(&fNVSHandle);
-	fNVSHandle = NULL;
+	EasyRTSP_CloseStream(fRTSPHandle);
+	EasyRTSP_Deinit(&fRTSPHandle);
+	fRTSPHandle = NULL;
 
     return 0;
 }

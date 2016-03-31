@@ -6,6 +6,21 @@
 */
 #include "EasyPusherAPI.h"
 #include "trace.h"
+#include <stdio.h>
+
+#ifdef _WIN32
+#include "getopt.h"
+#define KEY "6A34714D6C3469576B5A7541662F5257715174355875784659584E355548567A6147567958305A4A544555755A58686C56752B7141506A655A57467A65513D3D"
+#else
+#include "unistd.h"
+#include <signal.h>
+#define KEY "6A34714D6C3469576B5A7541662F5257715174355876426C59584E356348567A6147567958325A706247565737366F412B4E356C59584E35"
+#endif
+
+char* ConfigIP	=	"127.0.0.1";			//Default EasyDarwin Address 183.220.236.189
+char* ConfigPort=	"554";					//Default EasyDarwin Port121.40.50.44
+char* ConfigName=	"easypusher_file.sdp";	//Default RTSP Push StreamName
+char* ProgName;								//Program Name
 
 int __EasyPusher_Callback(int _id, EASY_PUSH_STATE_T _state, EASY_AV_Frame *_frame, void *_userptr)
 {
@@ -13,16 +28,34 @@ int __EasyPusher_Callback(int _id, EASY_PUSH_STATE_T _state, EASY_AV_Frame *_fra
     else if (_state == EASY_PUSH_STATE_CONNECTED)           printf("Connected\n");
     else if (_state == EASY_PUSH_STATE_CONNECT_FAILED)      printf("Connect failed\n");
     else if (_state == EASY_PUSH_STATE_CONNECT_ABORT)       printf("Connect abort\n");
-    else if (_state == EASY_PUSH_STATE_PUSHING)             printf("P->");
+    else if (_state == EASY_PUSH_STATE_PUSHING)             printf("\r Pushing to rtsp://%s:%d/%s ...", ConfigIP, atoi(ConfigPort), ConfigName);
     else if (_state == EASY_PUSH_STATE_DISCONNECTED)        printf("Disconnect.\n");
 
     return 0;
 }
-
-int main()
+void PrintUsage()
 {
+	printf("Usage:\n");
+	printf("------------------------------------------------------\n");
+	printf("%s [-d <host> -p <port> -n <streamName>]\n", ProgName);
+	printf("Help Mode:   %s -h \n", ProgName );
+	printf("For example: %s -d 115.29.139.20 -p 554 -n easypusher_file.sdp\n", ProgName); 
+	printf("------------------------------------------------------\n");
+}
+
+int main(int argc, char * argv[])
+{
+	int isActivated = 0 ;
+#ifndef _WIN32
+   signal(SIGPIPE, SIG_IGN);
+#endif
+
+#ifdef _WIN32
+	extern char* optarg;
+#endif
+	int ch;
     char szIP[16] = {0};
-    int pusherId = 0;
+    Easy_Pusher_Handle fPusherHandle = 0;
     EASY_MEDIA_INFO_T   mediainfo;
 
     int buf_size = 1024*512;
@@ -30,22 +63,76 @@ int main()
     FILE *fES = NULL;
 	int position = 0;
 	int iFrameNo = 0;
+	int timestamp = 0;
+	ProgName = argv[0];
+	PrintUsage();
 
-    WSADATA wsaData;
-    WSAStartup(MAKEWORD(2,2), &wsaData);
 
+	while ((ch = getopt(argc,argv, "hd:p:n:")) != EOF) 
+	{
+		switch(ch)
+		{
+		case 'h':
+			PrintUsage();
+			return 0;
+			break;
+		case 'd':
+			ConfigIP =optarg;
+			break;
+		case 'p':
+			ConfigPort =optarg;
+			break;
+		case 'n':
+			ConfigName =optarg;
+			break;
+		case '?':
+			return 0;
+			break;
+		default:
+			break;
+		}
+	}
     memset(&mediainfo, 0x00, sizeof(EASY_MEDIA_INFO_T));
-    mediainfo.u32VideoCodec =   0x1C;
+    mediainfo.u32VideoCodec =   EASY_SDK_VIDEO_CODEC_H264;
+	mediainfo.u32VideoFps = 25;
 
-    fES = fopen("./EasyDarwin.264", "rb");
+    fES = fopen("./EasyPusher.264", "rb");
     if (NULL == fES)        return 0;
 
-    pusherId = EasyPusher_Create();
+	isActivated = EasyPusher_Activate(KEY);
+	switch(isActivated)
+	{
+	case EASY_ACTIVATE_INVALID_KEY:
+		printf("KEY is EASY_ACTIVATE_INVALID_KEY!\n");
+		break;
+	case EASY_ACTIVATE_TIME_ERR:
+		printf("KEY is EASY_ACTIVATE_TIME_ERR!\n");
+		break;
+	case EASY_ACTIVATE_PROCESS_NAME_LEN_ERR:
+		printf("KEY is EASY_ACTIVATE_PROCESS_NAME_LEN_ERR!\n");
+		break;
+	case EASY_ACTIVATE_PROCESS_NAME_ERR:
+		printf("KEY is EASY_ACTIVATE_PROCESS_NAME_ERR!\n");
+		break;
+	case EASY_ACTIVATE_VALIDITY_PERIOD_ERR:
+		printf("KEY is EASY_ACTIVATE_VALIDITY_PERIOD_ERR!\n");
+		break;
+	case EASY_ACTIVATE_SUCCESS:
+		printf("KEY is EASY_ACTIVATE_SUCCESS!\n");
+		break;
+	}
 
-    EasyPusher_SetEventCallback(pusherId, __EasyPusher_Callback, 0, NULL);
+	if(EASY_ACTIVATE_SUCCESS != isActivated)
+		return -1;
 
-    EasyPusher_StartStream(pusherId, "127.0.0.1", 554, "live.sdp", "admin", "admin", &mediainfo);
-	printf("*** live streaming url:rtsp://115.29.139.20:554/live.sdp ***\n");
+    fPusherHandle = EasyPusher_Create();
+
+	if(fPusherHandle == NULL)
+		return -2;
+
+    EasyPusher_SetEventCallback(fPusherHandle, __EasyPusher_Callback, 0, NULL);
+
+	EasyPusher_StartStream(fPusherHandle, ConfigIP, atoi(ConfigPort), ConfigName, "admin", "admin", &mediainfo, 1024, 0);
 
 	while (1)
 	{
@@ -67,13 +154,11 @@ int main()
 		{
 			unsigned char naltype = ( (unsigned char)pbuf[position-1] & 0x1F);
 
-			if ( (unsigned char)pbuf[position-5]== 0x00 && 
+			if (	(unsigned char)pbuf[position-5]== 0x00 && 
 					(unsigned char)pbuf[position-4]== 0x00 && 
 					(unsigned char)pbuf[position-3] == 0x00 &&
 					(unsigned char)pbuf[position-2] == 0x01 &&
-					//(((unsigned char)pbuf[position-1] == 0x61) ||
-					//((unsigned char)pbuf[position-1] == 0x67) ) )
-					(naltype==0x07||naltype==0x01) )
+					(naltype == 0x07 || naltype == 0x01 ) )
 			{
 				int framesize = position - 5;
                 EASY_AV_Frame   avFrame;
@@ -84,10 +169,17 @@ int main()
                 avFrame.u32AVFrameLen   =   framesize;
                 avFrame.pBuffer = (unsigned char*)pbuf;
 				avFrame.u32VFrameType = (naltype==0x07)?EASY_SDK_VIDEO_FRAME_I:EASY_SDK_VIDEO_FRAME_P;
-                EasyPusher_PushFrame(pusherId, &avFrame);
+				avFrame.u32AVFrameFlag = EASY_SDK_VIDEO_FRAME_FLAG;
+				avFrame.u32TimestampSec = timestamp/1000;
+				avFrame.u32TimestampUsec = (timestamp%1000)*1000;
+                EasyPusher_PushFrame(fPusherHandle, &avFrame);
+				timestamp += 1000/mediainfo.u32VideoFps;
 
+#ifndef _WIN32
+                usleep(30*1000);
+#else
                 Sleep(30);
-
+#endif
 				memmove(pbuf, pbuf+position-5, 5);
 				position = 5;
 
@@ -101,13 +193,9 @@ int main()
 
     _TRACE("Press Enter exit...\n");
     getchar();
-    EasyPusher_StopStream(pusherId);
-    EasyPusher_Release(pusherId);
 
-
-
-
-
-    WSACleanup();
+    EasyPusher_StopStream(fPusherHandle);
+    EasyPusher_Release(fPusherHandle);
+	free(pbuf);
     return 0;
 }
